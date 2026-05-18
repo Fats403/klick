@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+/* Theme tokens — referenced from components as `text-foreground`, `bg-surface`,
+   etc. Tailwind v4's `@theme` declares CSS custom properties + matching
+   utility classes in one go. */
+@theme {
+  --color-background: #0b1020;
+  --color-surface: #131a2c;
+  --color-surface-elevated: #1a2238;
+  --color-border: #232b44;
+  --color-border-strong: #2f3a59;
+  --color-muted: #8a93b0;
+  --color-foreground: #e6e8f0;
+  --color-accent: #6366f1;
+  --color-accent-hover: #4f46e5;
+  --color-record: #ef4444;
+  --color-record-hover: #dc2626;
+  --color-zoom: #a78bfa;
+  --color-speed: #f59e0b;
+  --color-cut: #ef4444;
+  --color-success: #10b981;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  color: var(--color-foreground);
+  background: var(--color-background);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The macOS title bar gets a draggable region. Native controls override. */
+.drag-region { -webkit-app-region: drag; }
+.no-drag-region { -webkit-app-region: no-drag; }
+
+/* Reset some defaults for video */
+video { display: block; max-width: 100%; max-height: 100%; }
+
+/* Range inputs styled to match the dark theme */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: var(--color-border-strong);
+  border-radius: 2px;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-foreground);
+  cursor: pointer;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--color-border-strong); border-radius: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* Hide scrollbar where we want gesture-only scrolling (e.g. the timeline,
+   which pans via drag instead of a visible bar). The content still scrolls;
+   only the chrome disappears. */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
