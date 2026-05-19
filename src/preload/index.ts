@@ -42,6 +42,7 @@ export interface Api {
   writeText: (filePath: string, content: string) => Promise<true>;
   fileUrl: (filePath: string) => Promise<string>;
   revealInFinder: (filePath: string) => Promise<true>;
+  openExternal: (url: string) => Promise<true>;
   listCaptureSources: () => Promise<{ sources?: CaptureSource[]; error?: string }>;
   startNativeRecording: (payload: { sourceId: string; fps?: number }) => Promise<{
     ok?: true;
@@ -69,6 +70,7 @@ const api: Api = {
   writeText: (filePath, content) => ipcRenderer.invoke('fs:write-text', filePath, content),
   fileUrl: (filePath) => ipcRenderer.invoke('fs:file-url', filePath),
   revealInFinder: (filePath) => ipcRenderer.invoke('shell:reveal', filePath),
+  openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   listCaptureSources: () => ipcRenderer.invoke('record:list-sources'),
   startNativeRecording: (payload) => ipcRenderer.invoke('record:start-native', payload),
   stopNativeRecording: () => ipcRenderer.invoke('record:stop-native'),

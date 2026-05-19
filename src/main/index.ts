@@ -404,6 +404,14 @@ ipcMain.handle('shell:reveal', async (_evt: IpcMainInvokeEvent, filePath: string
   return true;
 });
 
+ipcMain.handle('shell:open-external', async (_evt: IpcMainInvokeEvent, url: string) => {
+  // Only http(s) — we never want a stray IPC arg to launch arbitrary URI
+  // handlers (mailto:, file://, custom schemes).
+  if (!/^https?:\/\//i.test(url)) return true;
+  await shell.openExternal(url);
+  return true;
+});
+
 // ---------- Event capture (uiohook) ----------
 
 const UIOHOOK_BUTTON: Record<number, string> = { 1: 'left', 2: 'right', 3: 'middle' };

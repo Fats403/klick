@@ -69,3 +69,15 @@ input[type="range"]::-webkit-slider-thumb {
    only the chrome disappears. */
 .no-scrollbar { scrollbar-width: none; }
 .no-scrollbar::-webkit-scrollbar { display: none; }
+
+/* Indeterminate progress bar — stripe sweeps cleanly across the track. The
+   bar element is `w-1/3`, so translateX(-100%) puts it fully off-left
+   (right edge at 0%) and translateX(300%) fully off-right (left edge at
+   100%). Easing only affects motion, never visibility. */
+@keyframes indeterminate-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+.indeterminate-bar {
+  animation: indeterminate-sweep 1.6s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
