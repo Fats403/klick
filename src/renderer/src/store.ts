@@ -183,6 +183,7 @@ const DEFAULTS = {
     enabled: true,
     style: 'default',
     color: '#ffffff',
+    outlineColor: '#1d1d1f',
     size: 28,
   } as CursorConfig,
 };

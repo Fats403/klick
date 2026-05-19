@@ -25,8 +25,8 @@ export function CursorTab() {
         {cursorCfg.enabled && (
           <>
             <Field label="Style">
-              <div className="grid grid-cols-2 gap-1.5">
-                {(['default', 'dot'] as Exclude<CursorStyle, 'none'>[]).map((s) => (
+              <div className="grid grid-cols-3 gap-1.5">
+                {(['default', 'pointer', 'dot', 'ring', 'crosshair'] as Exclude<CursorStyle, 'none'>[]).map((s) => (
                   <button
                     key={s}
                     onClick={() => setCursor({ style: s })}
@@ -51,10 +51,21 @@ export function CursorTab() {
                 className="w-7 h-7 rounded-md border border-border bg-transparent cursor-pointer"
               />
             </Row>
+            {(cursorCfg.style === 'default' || cursorCfg.style === 'pointer') && (
+              <Row>
+                <span className="text-xs text-muted">Outline</span>
+                <input
+                  type="color"
+                  value={cursorCfg.outlineColor}
+                  onChange={(e) => setCursor({ outlineColor: e.target.value })}
+                  className="w-7 h-7 rounded-md border border-border bg-transparent cursor-pointer"
+                />
+              </Row>
+            )}
             <Field label={`Size · ${cursorCfg.size}px`}>
               <input
                 type="range"
-                min={12} max={80} step={2}
+                min={12} max={120} step={2}
                 value={cursorCfg.size}
                 onChange={(e) => setCursor({ size: parseInt(e.target.value) })}
                 className="w-full accent-accent"

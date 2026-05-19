@@ -379,10 +379,12 @@ function validateProject(p: ProjectFile): ValidatedProject {
   };
 
   const cu = p.cursor;
+  const validCursorStyles = new Set(['none', 'default', 'pointer', 'dot', 'ring', 'crosshair']);
   const cursor: CursorConfig = {
     enabled: !!cu?.enabled,
-    style: (cu?.style === 'default' || cu?.style === 'dot' || cu?.style === 'none') ? cu.style : 'default',
+    style: validCursorStyles.has(cu?.style ?? '') ? (cu!.style as CursorConfig['style']) : 'default',
     color: typeof cu?.color === 'string' && HEX_COLOR_RE.test(cu.color) ? cu.color : '#ffffff',
+    outlineColor: typeof cu?.outlineColor === 'string' && HEX_COLOR_RE.test(cu.outlineColor) ? cu.outlineColor : '#1d1d1f',
     size: clampNum(cu?.size ?? 28, 4, 200, 'cursor.size'),
   };
 

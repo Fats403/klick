@@ -19,11 +19,10 @@ import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
 
-// Initialise AppKit's connection to the window server. Touching
-// NSApplication.shared triggers [NSApplication sharedApplication] which
-// boots the connection — without it CG calls into the window-server-aware
-// paths can hit `Assertion failed: did_initialize` in CGS.
-_ = NSApplication.shared
+// AppKit boot happens inside recordCommand() rather than at top-level —
+// touching NSApplication.shared promotes the process to a full app, and
+// the `list` subcommand's `exit(0)` no longer terminates cleanly once
+// that happens (the Electron parent then hangs waiting for the spawn).
 
 // MARK: - JSON output
 
@@ -278,6 +277,14 @@ func recordCommand(flags: [String: String]) async {
     guard let sourceID = flags["source"] else { die("--source required") }
     guard let outputPath = flags["output"] else { die("--output required") }
     let fps = Int(flags["fps"] ?? "60") ?? 60
+
+    // Boot AppKit's window-server connection before any SCK / AVAssetWriter
+    // / NSScreen calls. Without this, second-and-subsequent recordings in
+    // an app session hit `Assertion failed: did_initialize` in CGS.
+    // Confined to recordCommand (not at top-level) because `_ = NSApp` would
+    // promote the binary to a full app — the `list` subcommand's exit(0)
+    // would then no longer terminate cleanly and Electron would hang.
+    _ = NSApplication.shared
 
     let content: SCShareableContent
     do {
