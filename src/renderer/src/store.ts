@@ -36,7 +36,7 @@ export interface CutSegment {
 export type Segment = ZoomSegment | SpeedSegment | CutSegment;
 
 export type AspectRatio = 'native' | '16:9' | '9:16' | '1:1' | '4:5';
-export type InspectorTab = 'style' | 'zoom' | 'crop' | 'export';
+export type InspectorTab = 'look' | 'cursor' | 'zoom' | 'export';
 
 export interface Padding {
   top: number;
@@ -203,7 +203,7 @@ export const useEditor = create<EditorState & EditorActions>((set, get) => ({
   cursorSmoothing: DEFAULTS.cursorSmoothing,
   outputName: DEFAULTS.outputName,
   exportQuality: DEFAULTS.exportQuality,
-  activeTab: 'style',
+  activeTab: 'look',
   inspectorOpen: true,
   timelineZoom: 1,
   globalZoom: DEFAULTS.globalZoom,

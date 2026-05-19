@@ -1,16 +1,16 @@
-import { Settings2, ZoomIn, Crop, Upload, HelpCircle } from 'lucide-react';
+import { Image, MousePointer2, ZoomIn, Upload, HelpCircle } from 'lucide-react';
 import { useEditor, type InspectorTab } from '../store';
 
 interface TabDef {
   id: InspectorTab;
   label: string;
-  Icon: typeof Settings2;
+  Icon: typeof Image;
 }
 
 const TABS: TabDef[] = [
-  { id: 'style', label: 'Style', Icon: Settings2 },
+  { id: 'look', label: 'Look', Icon: Image },
+  { id: 'cursor', label: 'Cursor & Clicks', Icon: MousePointer2 },
   { id: 'zoom', label: 'Zoom', Icon: ZoomIn },
-  { id: 'crop', label: 'Crop', Icon: Crop },
   { id: 'export', label: 'Export', Icon: Upload },
 ];
 
