@@ -132,6 +132,7 @@ interface EditorActions {
   splitSegment: (id: string, atTime: number) => void;
   selectSegment: (id: string | null) => void;
   resetTimeline: () => void;
+  applyAutoZooms: () => void;
 
   hydrateFromProject: (proj: ProjectFile) => void;
   toProject: () => ProjectFile;
@@ -311,6 +312,19 @@ export const useEditor = create<EditorState & EditorActions>((set, get) => ({
       trim: { start: 0, end: s.videoDuration || 0 },
     })),
 
+  applyAutoZooms: () => {
+    const s = get();
+    const evs = s.events?.events;
+    // events.duration is captured during recording; falling back to
+    // videoDuration covers the case where this is called before <video>'s
+    // onLoadedMetadata has committed.
+    const duration = s.events?.duration ?? s.videoDuration;
+    if (!evs?.length || !duration || duration <= 0) return;
+    const zooms = computeAutoZooms(evs, duration, s.videoWidth || 1, s.videoHeight || 1, makeId);
+    if (!zooms.length) return;
+    set((state) => ({ segments: [...state.segments, ...zooms] }));
+  },
+
   hydrateFromProject: (proj) =>
     set({
       trim: proj.trim,
@@ -386,4 +400,65 @@ function findNearestClick(events: EventsObject | null, t: number) {
     }
   }
   return best;
+}
+
+// Tunables for auto-placed zoom segments. Pre-roll < post-roll so the zoom
+// is fully in when the click lands and lingers afterward for the user to
+// read the result.
+const AUTO_ZOOM_CLUSTER_WINDOW = 1.5;
+const AUTO_ZOOM_PRE_ROLL = 0.4;
+const AUTO_ZOOM_POST_ROLL = 1.2;
+const AUTO_ZOOM_MIN_GAP = 0.5;
+const AUTO_ZOOM_SCALE = 1.6;
+const AUTO_ZOOM_EASE = 0.4;
+
+function computeAutoZooms(
+  events: EventsObject['events'],
+  duration: number,
+  videoWidth: number,
+  videoHeight: number,
+  makeIdFn: () => string,
+): ZoomSegment[] {
+  const clickTimes: number[] = [];
+  for (const e of events) if (e.type === 'click') clickTimes.push(e.t);
+  clickTimes.sort((a, b) => a - b);
+  if (clickTimes.length === 0) return [];
+
+  // Cluster consecutive clicks within AUTO_ZOOM_CLUSTER_WINDOW seconds.
+  const clusters: number[][] = [];
+  let cur: number[] = [clickTimes[0]];
+  for (let i = 1; i < clickTimes.length; i++) {
+    if (clickTimes[i] - cur[cur.length - 1] < AUTO_ZOOM_CLUSTER_WINDOW) {
+      cur.push(clickTimes[i]);
+    } else {
+      clusters.push(cur);
+      cur = [clickTimes[i]];
+    }
+  }
+  clusters.push(cur);
+
+  const out: ZoomSegment[] = [];
+  for (const c of clusters) {
+    const first = c[0];
+    const last = c[c.length - 1];
+    let start = Math.max(0, first - AUTO_ZOOM_PRE_ROLL);
+    const end = Math.min(duration, last + AUTO_ZOOM_POST_ROLL);
+    if (out.length > 0) {
+      const prev = out[out.length - 1];
+      if (start < prev.end + AUTO_ZOOM_MIN_GAP) start = prev.end + AUTO_ZOOM_MIN_GAP;
+    }
+    if (end - start < 0.5) continue;
+    out.push({
+      id: makeIdFn(),
+      type: 'zoom',
+      start,
+      end,
+      scale: AUTO_ZOOM_SCALE,
+      x: videoWidth / 2,
+      y: videoHeight / 2,
+      ease: AUTO_ZOOM_EASE,
+      followCursor: true,
+    });
+  }
+  return out;
 }

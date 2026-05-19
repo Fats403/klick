@@ -97,6 +97,9 @@ export function useRecording() {
     setActive(false);
     setStopping(false);
     await loadVideo(outputPath);
+    // Drop one follow-cursor zoom segment per click cluster as a starting
+    // point. Users can drag the handles or delete what they don't want.
+    useEditor.getState().applyAutoZooms();
   };
 
   const stop = useCallback(async () => {
