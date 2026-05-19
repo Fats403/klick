@@ -185,7 +185,7 @@ export function Preview() {
 
   return (
     <div ref={stageRef} className="flex-1 min-h-0 bg-background flex items-center justify-center p-6 relative">
-      <div className="relative shadow-2xl" style={{ width: frameW, height: frameH, background: '#000' }}>
+      <div className="relative shadow-2xl" style={{ width: frameW, height: frameH, background: background.color }}>
         <div
           className="absolute overflow-hidden"
           style={{
@@ -194,11 +194,14 @@ export function Preview() {
             left: (frameW - bgW) / 2,
             top: (frameH - bgH) / 2,
             background: background.color,
-            borderRadius: background.radius * previewScale,
           }}
         >
           {/* Negative padding pushes the video past the bg frame's edges
-              and overflow:hidden clips it — that's how it becomes a crop. */}
+              and overflow:hidden clips it — that's how it becomes a crop.
+              borderRadius lives on this video container (not the bg panel)
+              so it rounds the video pixels directly — matches the export
+              where ffmpeg's geq mask applies to the video stream, not the
+              surrounding canvas. */}
           <div
             className="absolute"
             style={{
@@ -207,6 +210,7 @@ export function Preview() {
               left: background.padding.left * previewScale,
               top: background.padding.top * previewScale,
               overflow: 'hidden',
+              borderRadius: background.radius * previewScale,
             }}
           >
             <div
