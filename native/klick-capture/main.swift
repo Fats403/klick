@@ -10,6 +10,7 @@
 // Source ids: "display:<displayID>" or "window:<windowID>". macOS 13+.
 
 import Foundation
+import AppKit
 import ScreenCaptureKit
 import AVFoundation
 import CoreMedia
@@ -17,6 +18,12 @@ import CoreVideo
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
+
+// Initialise AppKit's connection to the window server. Touching
+// NSApplication.shared triggers [NSApplication sharedApplication] which
+// boots the connection — without it CG calls into the window-server-aware
+// paths can hit `Assertion failed: did_initialize` in CGS.
+_ = NSApplication.shared
 
 // MARK: - JSON output
 
@@ -100,6 +107,17 @@ func displayThumbnail(displayID: CGDirectDisplayID) -> String {
 func windowThumbnail(windowID: CGWindowID) -> String {
     guard let raw = CGWindowListCreateImage(.null, .optionIncludingWindow, windowID, [.bestResolution]) else { return "" }
     return encodeAsBase64PNG(resize(raw))
+}
+
+// Backing scale factor for the main display, derived via Core Graphics so
+// the call works in a CLI context without an NSApplication run loop.
+func mainDisplayBackingScale() -> Double {
+    let displayID = CGMainDisplayID()
+    guard let mode = CGDisplayCopyDisplayMode(displayID) else { return 2.0 }
+    let pointW = mode.width
+    let pixelW = mode.pixelWidth
+    guard pointW > 0 else { return 2.0 }
+    return Double(pixelW) / Double(pointW)
 }
 
 // MARK: - list
@@ -194,6 +212,7 @@ final class CaptureSink: NSObject, SCStreamOutput, SCStreamDelegate {
         guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         var startPump = false
+        var firstFrameMs: Int64? = nil
         lock.lock()
         lastBuffer = imageBuffer
         if !started {
@@ -202,8 +221,16 @@ final class CaptureSink: NSObject, SCStreamOutput, SCStreamDelegate {
             startedAt = Date()
             started = true
             startPump = true
+            firstFrameMs = Int64(startedAt!.timeIntervalSince1970 * 1000)
         }
         lock.unlock()
+        // First-frame wall-clock so Electron can align uiohook event
+        // timestamps to the video timeline (uiohook starts ~200ms before
+        // SCStream emits its first sample, which otherwise leaves the
+        // rendered cursor lagging the actual cursor in the recording).
+        if let ms = firstFrameMs {
+            FileHandle.standardOutput.write(Data("first-frame \(ms)\n".utf8))
+        }
         if startPump { startPumpTimer() }
     }
 
@@ -265,6 +292,14 @@ func recordCommand(flags: [String: String]) async {
     let filter: SCContentFilter
     let outWidth: Int
     let outHeight: Int
+    // Geometry of the capture region in the global screen-points coordinate
+    // system. Emitted to stdout on start so the renderer can translate
+    // uiohook click positions (which are in global screen coords) into the
+    // captured region's local space.
+    let captureOriginX: CGFloat
+    let captureOriginY: CGFloat
+    let captureWidth: CGFloat
+    let captureHeight: CGFloat
 
     if sourceID.hasPrefix("display:") {
         let raw = String(sourceID.dropFirst("display:".count))
@@ -274,6 +309,10 @@ func recordCommand(flags: [String: String]) async {
         filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
         outWidth = display.width
         outHeight = display.height
+        captureOriginX = display.frame.origin.x
+        captureOriginY = display.frame.origin.y
+        captureWidth = display.frame.width
+        captureHeight = display.frame.height
     } else if sourceID.hasPrefix("window:") {
         let raw = String(sourceID.dropFirst("window:".count))
         guard let id = UInt32(raw), let window = content.windows.first(where: { $0.windowID == id }) else {
@@ -281,10 +320,14 @@ func recordCommand(flags: [String: String]) async {
         }
         filter = SCContentFilter(desktopIndependentWindow: window)
         // SCKit returns window dimensions in points; convert to physical
-        // pixels via backingScaleFactor.
-        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        // pixels via the main display's backing scale.
+        let scale = mainDisplayBackingScale()
         outWidth = Int(window.frame.width * scale)
         outHeight = Int(window.frame.height * scale)
+        captureOriginX = window.frame.origin.x
+        captureOriginY = window.frame.origin.y
+        captureWidth = window.frame.width
+        captureHeight = window.frame.height
     } else {
         die("source id must start with 'display:' or 'window:'")
     }
@@ -341,7 +384,24 @@ func recordCommand(flags: [String: String]) async {
     }
 
     // Tell Electron we're actually recording (not still warming up SCStream).
-    FileHandle.standardOutput.write(Data("started\n".utf8))
+    // The trailing JSON is the captured region's geometry in global
+    // screen-points so the renderer can translate event positions into the
+    // captured region's local coordinate space.
+    struct StartGeometry: Codable {
+        let x: Double
+        let y: Double
+        let w: Double
+        let h: Double
+    }
+    let geom = StartGeometry(
+        x: Double(captureOriginX),
+        y: Double(captureOriginY),
+        w: Double(captureWidth),
+        h: Double(captureHeight),
+    )
+    let geomBytes = (try? JSONEncoder().encode(geom)) ?? Data("{}".utf8)
+    let geomStr = String(data: geomBytes, encoding: .utf8) ?? "{}"
+    FileHandle.standardOutput.write(Data("started \(geomStr)\n".utf8))
 
     // SIGTERM from Electron on stop; SIGINT for interactive ^C.
     let semaphore = DispatchSemaphore(value: 0)

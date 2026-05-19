@@ -43,7 +43,14 @@ export interface Api {
   fileUrl: (filePath: string) => Promise<string>;
   revealInFinder: (filePath: string) => Promise<true>;
   listCaptureSources: () => Promise<{ sources?: CaptureSource[]; error?: string }>;
-  startNativeRecording: (payload: { sourceId: string; fps?: number }) => Promise<{ ok?: true; outputPath?: string; error?: string }>;
+  startNativeRecording: (payload: { sourceId: string; fps?: number }) => Promise<{
+    ok?: true;
+    outputPath?: string;
+    // Captured region's geometry in screen-points. Used to map uiohook click
+    // positions into the captured area's local coordinate space.
+    geometry?: { x: number; y: number; w: number; h: number };
+    error?: string;
+  }>;
   stopNativeRecording: () => Promise<{ ok?: true; outputPath?: string; error?: string; stderr?: string }>;
   startEventCapture: () => Promise<{ ok?: true; error?: string }>;
   stopEventCapture: () => Promise<{ events: EventsObject | null }>;

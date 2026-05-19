@@ -17,6 +17,10 @@ export function useRecording() {
   const [log, setLog] = useState('');
 
   const recordingOutputPath = useRef<string | null>(null);
+  // Captured region's geometry in global screen-points, returned by the
+  // native binary at start. Used in finish() to shift uiohook event
+  // positions into the captured area's local coordinate space.
+  const captureGeometry = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
   const startedAt = useRef<number>(0);
   const elapsedTimer = useRef<number | null>(null);
   const starting = useRef(false);
@@ -56,7 +60,7 @@ export function useRecording() {
       appendLog('events', `failed: ${(err as Error).message}`);
     }
 
-    let started: { ok?: true; outputPath?: string; error?: string };
+    let started: Awaited<ReturnType<typeof window.api.startNativeRecording>>;
     try {
       started = await window.api.startNativeRecording({ sourceId: src.id });
     } catch (err) {
@@ -81,6 +85,7 @@ export function useRecording() {
     }
 
     recordingOutputPath.current = started.outputPath;
+    captureGeometry.current = started.geometry ?? null;
     startedAt.current = Date.now();
     appendLog('recorder', `recording "${src.name}" → ${started.outputPath}`);
     setActive(true);
@@ -93,7 +98,25 @@ export function useRecording() {
     try { resp = await window.api.stopEventCapture(); }
     catch (err) { appendLog('events', `stop failed: ${(err as Error).message}`); }
 
-    setEvents(resp.events);
+    // Shift uiohook events from global screen-coords into the captured
+    // region's local coords, so a window recorded at screen (200, 100) gets
+    // events relative to the window's top-left rather than the screen's.
+    // screen_width / _height get overwritten to match the captured region
+    // so downstream renderers' "events × videoW/screenW" math stays correct.
+    const events = resp.events;
+    const geom = captureGeometry.current;
+    if (events && geom) {
+      events.events = events.events.map((e) => ({
+        ...e,
+        x: Math.round(e.x - geom.x),
+        y: Math.round(e.y - geom.y),
+      }));
+      events.screen_width = Math.round(geom.w);
+      events.screen_height = Math.round(geom.h);
+    }
+    captureGeometry.current = null;
+
+    setEvents(events);
     setActive(false);
     setStopping(false);
     await loadVideo(outputPath);

@@ -40,6 +40,11 @@ type InputEvent =
 interface EventCapture {
   events: InputEvent[];
   startMs: number;
+  // Wall-clock moment SCStream's first frame landed, if/when the native
+  // binary reports it. Used to align event timestamps to the video
+  // timeline — uiohook starts before SCStream's warmup completes, so
+  // without this offset every event would lead the video by ~200ms.
+  firstFrameAt: number | null;
   lastMoveMs: number;
   screenW: number;
   screenH: number;
@@ -58,7 +63,7 @@ function createWindow() {
     height: 820,
     minWidth: 1000,
     minHeight: 600,
-    backgroundColor: '#0b1020',
+    backgroundColor: '#f2f2f7',
     titleBarStyle: 'hiddenInset',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
@@ -166,10 +171,13 @@ function killActiveCapture() {
 
 // ---------- Native capture binary ----------
 
+interface CaptureGeometry { x: number; y: number; w: number; h: number }
+
 interface ActiveCapture {
   proc: ChildProcessByStdio<null, NodeReadable, NodeReadable>;
   outputPath: string;
   stderr: string;
+  geometry: CaptureGeometry | null;
 }
 
 let activeCapture: ActiveCapture | null = null;
@@ -226,26 +234,41 @@ ipcMain.handle('record:start-native', async (_evt: IpcMainInvokeEvent, { sourceI
 
   const proc = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-  // The binary writes "started\n" once SCStream.startCapture() returns. We
-  // resolve only after we see that line, so the renderer never thinks
-  // recording is live before frames are flowing into the mp4.
-  return new Promise<{ ok?: true; outputPath?: string; error?: string }>((resolve) => {
+  // The binary writes "started {json}\n" once SCStream.startCapture() returns.
+  // The JSON carries the capture region's geometry in global screen-points;
+  // the renderer needs it to translate uiohook click coords into the
+  // recorded region's local space.
+  return new Promise<{ ok?: true; outputPath?: string; geometry?: CaptureGeometry; error?: string }>((resolve) => {
     let started = false;
     let stdoutBuf = '';
     let stderrBuf = '';
 
     const tryFinishStart = () => {
-      if (started || !stdoutBuf.includes('started')) return;
+      if (started) return;
+      const m = stdoutBuf.match(/started (\{[^\n]+\})/);
+      if (!m) return;
+      let geometry: CaptureGeometry | null = null;
+      try { geometry = JSON.parse(m[1]) as CaptureGeometry; } catch { /* leave null */ }
       started = true;
-      activeCapture = { proc, outputPath, stderr: stderrBuf };
+      activeCapture = { proc, outputPath, stderr: stderrBuf, geometry };
       proc.stderr.removeAllListeners('data');
       proc.stderr.on('data', (d) => { if (activeCapture) activeCapture.stderr += d.toString(); });
-      resolve({ ok: true, outputPath });
+      resolve({ ok: true, outputPath, geometry: geometry ?? undefined });
+    };
+
+    // Binary writes "first-frame <epoch_ms>\n" inside the SCStream callback
+    // on the first sample. We stash it on eventCapture so stop-events can
+    // shift uiohook event timestamps to the video timeline.
+    const tryRecordFirstFrame = () => {
+      if (!eventCapture || eventCapture.firstFrameAt) return;
+      const m = stdoutBuf.match(/first-frame (\d+)/);
+      if (m) eventCapture.firstFrameAt = parseInt(m[1], 10);
     };
 
     proc.stdout.on('data', (d) => {
       stdoutBuf += d.toString();
       tryFinishStart();
+      tryRecordFirstFrame();
     });
     proc.stderr.on('data', (d) => { stderrBuf += d.toString(); });
 
@@ -390,6 +413,7 @@ ipcMain.handle('record:start-events', async () => {
   const cap: EventCapture = {
     events: [],
     startMs: Date.now(),
+    firstFrameAt: null,
     lastMoveMs: 0,
     screenW: display.bounds.width,
     screenH: display.bounds.height,
@@ -445,14 +469,26 @@ ipcMain.handle('record:stop-events', async () => {
     uIOhook.off('mousedown', cap.handlers.mousedown);
     uIOhook.stop();
   } catch { /* swallow */ }
+  // Shift event timestamps so t=0 aligns with the video's first frame.
+  // Anything that happened before the video began (during SCStream warmup)
+  // gets dropped — there's no video to render it against.
+  const offsetSec = cap.firstFrameAt && cap.firstFrameAt > cap.startMs
+    ? (cap.firstFrameAt - cap.startMs) / 1000
+    : 0;
+  const adjusted = offsetSec > 0
+    ? cap.events
+        .map((e) => ({ ...e, t: +(e.t - offsetSec).toFixed(4) }))
+        .filter((e) => e.t >= 0)
+    : cap.events;
+  const referenceMs = cap.firstFrameAt ?? cap.startMs;
   return {
     events: {
       version: 1,
-      started_at_wall: cap.startMs / 1000,
-      duration: +((Date.now() - cap.startMs) / 1000).toFixed(4),
+      started_at_wall: referenceMs / 1000,
+      duration: +((Date.now() - referenceMs) / 1000).toFixed(4),
       screen_width: cap.screenW,
       screen_height: cap.screenH,
-      events: cap.events,
+      events: adjusted,
     },
   };
 });

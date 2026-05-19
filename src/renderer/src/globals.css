@@ -2,23 +2,25 @@
 
 /* Theme tokens — referenced from components as `text-foreground`, `bg-surface`,
    etc. Tailwind v4's `@theme` declares CSS custom properties + matching
-   utility classes in one go. */
+   utility classes in one go.
+   Light theme is built off macOS's grouped-background palette: #f2f2f7 as the
+   canvas (warm light gray, not pure white), white for lifted surfaces. */
 @theme {
-  --color-background: #0b1020;
-  --color-surface: #131a2c;
-  --color-surface-elevated: #1a2238;
-  --color-border: #232b44;
-  --color-border-strong: #2f3a59;
-  --color-muted: #8a93b0;
-  --color-foreground: #e6e8f0;
+  --color-background: #f2f2f7;
+  --color-surface: #ffffff;
+  --color-surface-elevated: #ffffff;
+  --color-border: #d2d2d7;
+  --color-border-strong: #b0b0b5;
+  --color-muted: #6e6e73;
+  --color-foreground: #1d1d1f;
   --color-accent: #6366f1;
   --color-accent-hover: #4f46e5;
-  --color-record: #ef4444;
-  --color-record-hover: #dc2626;
-  --color-zoom: #a78bfa;
-  --color-speed: #f59e0b;
-  --color-cut: #ef4444;
-  --color-success: #10b981;
+  --color-record: #ff3b30;
+  --color-record-hover: #d70015;
+  --color-zoom: #af52de;
+  --color-speed: #ff9500;
+  --color-cut: #ff3b30;
+  --color-success: #34c759;
 }
 
 html, body, #root {
@@ -41,7 +43,6 @@ body {
 /* Reset some defaults for video */
 video { display: block; max-width: 100%; max-height: 100%; }
 
-/* Range inputs styled to match the dark theme */
 input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
