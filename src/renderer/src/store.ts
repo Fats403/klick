@@ -170,7 +170,7 @@ const DEFAULTS = {
   aspect: 'native' as AspectRatio,
   cursorSmoothing: true,
   outputName: 'demo.mp4',
-  exportQuality: 'high' as ExportQuality,
+  exportQuality: 'balanced' as ExportQuality,
   globalZoom: { enabled: false, scale: 1.25 } as GlobalZoomConfig,
   clickAnimation: {
     enabled: true,

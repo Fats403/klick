@@ -20,9 +20,9 @@ export function ExportOverlay({ onClose }: Props) {
   const [outPath, setOutPath] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [errorLog, setErrorLog] = useState('');
-  // Live log buffer kept only so we can attach the tail to error reports.
-  // Not rendered during the running state — most users don't care about
-  // ffmpeg's output unless something failed.
+  // Live tail of the log shown during running, plus a ref-backed buffer
+  // kept across the whole export so the error report has the full context.
+  const [liveTail, setLiveTail] = useState('');
   const logBuf = useRef('');
 
   useEffect(() => {
@@ -36,7 +36,12 @@ export function ExportOverlay({ onClose }: Props) {
       setOutPath(dest);
       setStatus('running');
 
-      unsub = window.api.onExportLog((text) => { logBuf.current += text; });
+      unsub = window.api.onExportLog((text) => {
+        logBuf.current += text;
+        // Update tail (last 14 lines) for the live UI. Keeping React state
+        // small avoids stalling re-render on the multi-MB ffmpeg log.
+        setLiveTail(tailLines(logBuf.current, 14));
+      });
 
       const result = await window.api.runExport({
         projectJson: toProject(),
@@ -73,8 +78,12 @@ export function ExportOverlay({ onClose }: Props) {
     setStatus('running');
     setErrorMessage('');
     setErrorLog('');
+    setLiveTail('');
     logBuf.current = '';
-    const unsub = window.api.onExportLog((text) => { logBuf.current += text; });
+    const unsub = window.api.onExportLog((text) => {
+      logBuf.current += text;
+      setLiveTail(tailLines(logBuf.current, 14));
+    });
     window.api.runExport({
       projectJson: toProject(),
       videoPath,
@@ -100,10 +109,10 @@ export function ExportOverlay({ onClose }: Props) {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
       <div className="bg-surface border border-border rounded-xl w-[min(480px,92vw)] shadow-2xl">
         {status === 'running' && (
-          <RunningView outPath={outPath} onCancel={handleClose} />
+          <RunningView outPath={outPath} liveTail={liveTail} onCancel={handleClose} />
         )}
         {status === 'done' && outPath && (
-          <DoneView outPath={outPath} onClose={onClose} />
+          <DoneView outPath={outPath} fullLog={logBuf.current} onClose={onClose} />
         )}
         {status === 'error' && (
           <ErrorView
@@ -128,40 +137,96 @@ function IdleView() {
   );
 }
 
-function RunningView({ outPath, onCancel }: { outPath: string | null; onCancel: () => void }) {
+function RunningView({
+  outPath,
+  liveTail,
+  onCancel,
+}: {
+  outPath: string | null;
+  liveTail: string;
+  onCancel: () => void;
+}) {
+  const tailRef = useRef<HTMLPreElement>(null);
+  // Auto-scroll the log tail so the newest line is always at the bottom.
+  useEffect(() => {
+    const el = tailRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [liveTail]);
+
   return (
     <div className="px-6 py-6">
       <div className="flex items-center gap-2.5 mb-1">
         <Loader2 className="w-4 h-4 text-accent animate-spin" />
         <h2 className="text-sm font-semibold">Exporting your video</h2>
       </div>
-      <p className="text-xs text-muted mb-5 truncate">
+      <p className="text-xs text-muted mb-4 truncate">
         {outPath ? filename(outPath) : 'Encoding with ffmpeg.'}
       </p>
       <div className="h-1.5 bg-border/60 rounded-full overflow-hidden relative">
         <div className="absolute inset-y-0 left-0 w-1/3 bg-accent rounded-full indeterminate-bar" />
       </div>
-      <p className="text-[11px] text-muted mt-3">
-        This usually takes a few seconds. Don't close the app.
-      </p>
-      <div className="flex justify-end mt-5">
+      {liveTail && (
+        <pre
+          ref={tailRef}
+          className="mt-4 bg-background border border-border rounded-md p-2 text-[10px] text-muted h-40 overflow-auto whitespace-pre-wrap leading-tight"
+        >
+          {liveTail}
+        </pre>
+      )}
+      <div className="flex justify-end mt-4">
         <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
       </div>
     </div>
   );
 }
 
-function DoneView({ outPath, onClose }: { outPath: string; onClose: () => void }) {
+function DoneView({
+  outPath,
+  fullLog,
+  onClose,
+}: {
+  outPath: string;
+  fullLog: string;
+  onClose: () => void;
+}) {
+  const [logOpen, setLogOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyLog = async () => {
+    try {
+      await navigator.clipboard.writeText(fullLog);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard blocked — fail silently */ }
+  };
+
   return (
     <div className="px-6 py-6">
       <div className="flex items-center gap-2.5 mb-1">
         <CheckCircle2 className="w-5 h-5 text-success" />
         <h2 className="text-sm font-semibold">Export complete</h2>
       </div>
-      <p className="text-xs text-muted mb-5 break-all">
+      <p className="text-xs text-muted mb-4 break-all">
         Saved to <span className="text-foreground">{outPath}</span>
       </p>
-      <div className="flex justify-end gap-2">
+
+      <button
+        type="button"
+        onClick={() => setLogOpen((b) => !b)}
+        className="text-xs text-muted hover:text-foreground flex items-center gap-1"
+      >
+        {logOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+        Export log
+      </button>
+      {logOpen && (
+        <pre className="bg-background border border-border rounded-md p-2 mt-2 text-[10px] text-muted max-h-48 overflow-auto whitespace-pre-wrap leading-tight">
+          {fullLog || '(empty)'}
+        </pre>
+      )}
+
+      <div className="flex justify-end gap-2 mt-5">
+        <Button variant="ghost" size="sm" onClick={copyLog}>
+          <Copy className="w-3.5 h-3.5" /> {copied ? 'Copied' : 'Copy log'}
+        </Button>
         <Button variant="secondary" size="sm" onClick={() => window.api.revealInFinder(outPath)}>
           <Folder className="w-3.5 h-3.5" /> Show in Finder
         </Button>
@@ -251,6 +316,11 @@ function ErrorView({
 
 function filename(p: string): string {
   return p.split('/').pop() ?? p;
+}
+
+function tailLines(text: string, n: number): string {
+  const lines = text.split('\n');
+  return lines.slice(-n).join('\n');
 }
 
 // Trim the captured log to the most useful tail. ffmpeg outputs thousands of

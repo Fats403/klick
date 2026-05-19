@@ -49,13 +49,19 @@ export interface ProjectFile {
 
 type ExportQuality = 'high' | 'balanced' | 'fast';
 
-// Three CRF / preset pairs picked so the tiers feel distinct: High stays in
-// libx264's visually-transparent range, Balanced halves the file size, Fast
-// trades quality for encode speed.
-const QUALITY_PRESETS: Record<ExportQuality, { crf: string; preset: string }> = {
-  high: { crf: '18', preset: 'medium' },
-  balanced: { crf: '22', preset: 'medium' },
-  fast: { crf: '26', preset: 'fast' },
+// Quality tier knobs. `maxDim` caps the longer side of the output (null =
+// source resolution). `fps` is the output frame rate — 30 is fine for
+// landing-page demos where most content is static; 60 is meaningfully
+// smoother on fast camera motion and cursor movement.
+//
+// Downscaling + lower fps + a faster x264 preset together drop a 20-second
+// retina-source export from "5+ minutes" to "well under a minute" because
+// every filter in the pipeline (overlay composite, alphamerge, scale, crop,
+// and h264 encode) scales with pixel-count × frame-count.
+const QUALITY_PRESETS: Record<ExportQuality, { crf: string; preset: string; maxDim: number | null; fps: number }> = {
+  high:     { crf: '18', preset: 'medium',    maxDim: null, fps: 60 },
+  balanced: { crf: '22', preset: 'fast',      maxDim: 1920, fps: 30 },
+  fast:     { crf: '26', preset: 'ultrafast', maxDim: 1280, fps: 30 },
 };
 
 interface SrcInfo { width: number; height: number; fps: number; duration: number }
@@ -124,7 +130,46 @@ export async function runExport(opts: ExportOptions): Promise<ExportResult> {
   } catch (err) {
     return { error: (err as Error).message };
   }
-  const outputFps = computeOutputFps(src);
+  const outputFps = computeOutputFps(src, validated.quality);
+
+  // Sum of chunk durations after speed adjustment — what the output should
+  // be. We use this both to log expectation and to cap ffmpeg with `-t`
+  // so a runaway filter graph (looped input mis-bounding, infinite color
+  // canvas escaping shortest=1, etc.) can't produce a multi-minute output
+  // for what should be a 6-second video.
+  const expectedDurationSec = plan.chunks.reduce((s, c) => s + (c.b - c.a) / c.sp, 0);
+  onLog?.(`Expected output duration: ${expectedDurationSec.toFixed(2)}s (trim=${validated.trim.start.toFixed(2)}–${validated.trim.end.toFixed(2)}, ${plan.chunks.length} chunk(s))\n`);
+
+  // Segment + zoom diagnostics so we can see exactly what the export is
+  // being told to apply. If zoom segments live in the project but aren't
+  // listed here, something stripped them in validation; if they're listed
+  // but the output looks un-zoomed, the issue is downstream in the filter
+  // graph.
+  const zoomSegs = validated.segments.filter((s) => s.type === 'zoom');
+  const speedSegs = validated.segments.filter((s) => s.type === 'speed');
+  const cutSegs = validated.segments.filter((s) => s.type === 'cut');
+  onLog?.(`Segments: ${zoomSegs.length} zoom, ${speedSegs.length} speed, ${cutSegs.length} cut\n`);
+  for (const z of zoomSegs) {
+    const zz = z as { start: number; end: number; scale: number; followCursor?: boolean; x: number; y: number };
+    onLog?.(`  zoom ${zz.start.toFixed(2)}–${zz.end.toFixed(2)}s ${zz.scale}x ${zz.followCursor ? 'follow' : `@(${Math.round(zz.x)},${Math.round(zz.y)})`}\n`);
+  }
+  onLog?.(`Global zoom: ${validated.globalZoom.enabled ? validated.globalZoom.scale + 'x' : 'off'}\n`);
+
+  // Per-tier output downscale. Apply once at the start of the filter chain
+  // so every subsequent filter operates at the cheaper size. Overlay PNG
+  // dimensions, mask PNG dimensions, and zoom cx/cy expressions all get
+  // multiplied through by exportScale below.
+  const tierMaxDim = QUALITY_PRESETS[validated.quality].maxDim;
+  const longestSide = Math.max(src.width, src.height);
+  const exportScale = tierMaxDim != null && longestSide > tierMaxDim
+    ? tierMaxDim / longestSide
+    : 1.0;
+  const evenify = (n: number) => (n % 2 === 0 ? n : n - 1);
+  const exportW = evenify(Math.max(4, Math.round(src.width * exportScale)));
+  const exportH = evenify(Math.max(4, Math.round(src.height * exportScale)));
+  if (exportScale < 1) {
+    onLog?.(`Downscaling pipeline ${src.width}x${src.height} → ${exportW}x${exportH} (tier=${validated.quality})\n`);
+  }
 
   const events = validated.events?.events ?? [];
   const hasMoves = events.some((e) => e.type === 'move');
@@ -139,10 +184,11 @@ export async function runExport(opts: ExportOptions): Promise<ExportResult> {
 
   let overlayTmpDir: string | null = null;
   if (wantsOverlay) {
+    const overlayStart = Date.now();
     try {
       overlayTmpDir = await renderOverlayFrames(
-        src.width,
-        src.height,
+        exportW,
+        exportH,
         validated.clickAnimation,
         validated.cursor,
         validated.events!,
@@ -154,6 +200,7 @@ export async function runExport(opts: ExportOptions): Promise<ExportResult> {
     } catch (err) {
       return { error: `Overlay render failed: ${(err as Error).message}` };
     }
+    onLog?.(`Overlay frames rendered in ${((Date.now() - overlayStart) / 1000).toFixed(1)}s\n`);
   }
   const cleanupOverlayTmpDir = async () => {
     if (overlayTmpDir) {
@@ -162,17 +209,60 @@ export async function runExport(opts: ExportOptions): Promise<ExportResult> {
     }
   };
 
+  // Pre-render the rounded-corner alpha mask if the project has one.
+  // Replaces ffmpeg's per-pixel `geq` mask, which was the single biggest
+  // CPU hog in the export pipeline. Generated at the *scaled* post-crop
+  // dimensions so it matches the video stream that alphamerge will apply
+  // it to.
+  let maskPath: string | null = null;
+  if (validated.background.radius > 0) {
+    const padding = validated.background.padding;
+    const cropL = Math.round(Math.max(0, -padding.left) * exportScale);
+    const cropR = Math.round(Math.max(0, -padding.right) * exportScale);
+    const cropT = Math.round(Math.max(0, -padding.top) * exportScale);
+    const cropB = Math.round(Math.max(0, -padding.bottom) * exportScale);
+    const cropW = exportW - cropL - cropR;
+    const cropH = exportH - cropT - cropB;
+    const scaledRadius = Math.round(validated.background.radius * exportScale);
+    if (cropW > 4 && cropH > 4 && scaledRadius > 0) {
+      const maskTmp = await fs.mkdtemp(path.join(os.tmpdir(), 'klick-mask-'));
+      maskPath = path.join(maskTmp, 'mask.png');
+      await writeRoundedMask(maskPath, cropW, cropH, scaledRadius);
+    }
+  }
+  const cleanupMaskDir = async () => {
+    if (maskPath) {
+      await fs.rm(path.dirname(maskPath), { recursive: true, force: true }).catch(() => {});
+      maskPath = null;
+    }
+  };
+
   let graph: string;
   let outLabels: [string, string | null];
+  let activeFilters: string[] = [];
   try {
-    const built = buildFilterGraph(plan, validated, src, hasAudio, outputFps, overlayTmpDir !== null);
+    const built = buildFilterGraph(
+      plan, validated, src, hasAudio, outputFps,
+      overlayTmpDir !== null, maskPath !== null,
+      exportScale, exportW, exportH,
+    );
     graph = built.graph;
     outLabels = built.outLabels;
+    activeFilters = built.activeFilters;
   } catch (err) {
     await cleanupOverlayTmpDir();
+    await cleanupMaskDir();
     return { error: (err as Error).message };
   }
-  onLog?.(`Filter graph (${graph.length} chars built, output ${outputFps} fps)\n`);
+  onLog?.(`Filter chain: ${activeFilters.join(' → ')}\n`);
+  onLog?.(`Filter graph (${graph.length} chars, output ${outputFps} fps)\n`);
+  // Persist the graph to a temp file so it can be inspected without
+  // spamming the live log with 30k+ chars on one line.
+  try {
+    const graphDumpPath = path.join(os.tmpdir(), `klick-graph-${Date.now()}.txt`);
+    await fs.writeFile(graphDumpPath, graph);
+    onLog?.(`Filter graph dumped to: ${graphDumpPath}\n`);
+  } catch { /* non-fatal */ }
 
   const args: string[] = ['-y', '-i', videoPath];
   if (overlayTmpDir) {
@@ -184,12 +274,17 @@ export async function runExport(opts: ExportOptions): Promise<ExportResult> {
       '-i', path.join(overlayTmpDir, 'f_%06d.png'),
     );
   }
+  if (maskPath) {
+    // -loop 1 makes ffmpeg treat the single PNG as an endlessly-repeating
+    // stream so it lasts the whole video.
+    args.push('-loop', '1', '-i', maskPath);
+  }
   args.push('-filter_complex', graph, '-map', outLabels[0]);
   if (hasAudio && outLabels[1]) {
     args.push('-map', outLabels[1]);
   }
   const { crf, preset } = QUALITY_PRESETS[validated.quality];
-  onLog?.(`Quality: ${validated.quality} (CRF ${crf}, preset ${preset})\n`);
+  onLog?.(`Quality: ${validated.quality} (CRF ${crf}, preset ${preset}, ${outputFps}fps, ${exportW}x${exportH})\n`);
   args.push(
     '-r', String(outputFps),
     '-c:v', 'libx264',
@@ -197,9 +292,15 @@ export async function runExport(opts: ExportOptions): Promise<ExportResult> {
     '-crf', crf,
     '-pix_fmt', 'yuv420p',
     '-movflags', '+faststart',
+    // Hard cap on output duration. With the looped mask input and infinite
+    // color canvas, any single missing `shortest=1` in the filter graph
+    // can let the output run away. Bound it.
+    '-t', expectedDurationSec.toFixed(3),
     outPath,
   );
 
+  const ffmpegStart = Date.now();
+  onLog?.(`Spawning ffmpeg…\n`);
   const result = await new Promise<ExportResult>((resolve) => {
     const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
@@ -224,6 +325,7 @@ export async function runExport(opts: ExportOptions): Promise<ExportResult> {
     });
     proc.on('exit', (code) => {
       signal?.removeEventListener('abort', onAbort);
+      onLog?.(`ffmpeg finished in ${((Date.now() - ffmpegStart) / 1000).toFixed(1)}s (exit ${code})\n`);
       if (aborted) resolve({ error: 'Export cancelled.' });
       else if (code === 0) resolve({ ok: true, outPath });
       else resolve({ error: `ffmpeg exited with code ${code}`, stderr });
@@ -231,6 +333,7 @@ export async function runExport(opts: ExportOptions): Promise<ExportResult> {
   });
 
   await cleanupOverlayTmpDir();
+  await cleanupMaskDir();
   return result;
 }
 
@@ -365,7 +468,7 @@ function validateProject(p: ProjectFile): ValidatedProject {
 
   const quality: ExportQuality = p.export_quality && p.export_quality in QUALITY_PRESETS
     ? p.export_quality
-    : 'high';
+    : 'balanced';
 
   const ca = p.click_animation;
   const clickAnimation: ClickAnimationConfig = {
@@ -483,10 +586,12 @@ function planExport(project: ValidatedProject): ExportPlan {
   return { cuts, speeds, zooms, ranges, chunks };
 }
 
-// Upsample to at least 60 Hz so camera motion tracks display refresh rather
-// than the (often 30 Hz) capture rate. Otherwise fast pans read as rigid.
-function computeOutputFps(src: SrcInfo): number {
-  return Math.max(60, Math.round(src.fps));
+// Output fps is whatever the tier specifies. ffmpeg's `fps=` filter handles
+// up/down resampling — duplicating frames when the source is slower, or
+// dropping when faster. Tying fps to the tier means Fast can halve all the
+// per-frame work while High/Balanced stay smooth.
+function computeOutputFps(_src: SrcInfo, quality: ExportQuality): number {
+  return QUALITY_PRESETS[quality].fps;
 }
 
 function buildFilterGraph(
@@ -496,11 +601,16 @@ function buildFilterGraph(
   hasAudio: boolean,
   outputFps: number,
   hasClickOverlay: boolean,
-): { graph: string; outLabels: [string, string | null] } {
+  hasRoundedMask: boolean,
+  exportScale: number,
+  exportW: number,
+  exportH: number,
+): { graph: string; outLabels: [string, string | null]; activeFilters: string[] } {
   const { speeds, zooms, ranges, chunks } = plan;
 
   const parts: string[] = [];
   const segLabels: { v: string; a: string | null }[] = [];
+  const activeFilters: string[] = [`trim+concat(${chunks.length})`];
 
   chunks.forEach(({ a, b, sp }, i) => {
     const vIn = '[0:v]';
@@ -539,16 +649,29 @@ function buildFilterGraph(
   if (outputFps !== Math.round(src.fps)) {
     parts.push(`${vCur}fps=${outputFps}[vfps]`);
     vCur = '[vfps]';
+    activeFilters.push(`fps=${outputFps}`);
+  }
+
+  // Apply the tier-based downscale up front so every filter below operates
+  // at the cheaper resolution. flags=bilinear is plenty for downscaling
+  // and is a chunk faster than the default lanczos.
+  if (exportScale < 1) {
+    parts.push(`${vCur}scale=${exportW}:${exportH}:flags=bilinear[v_dn]`);
+    vCur = '[v_dn]';
+    activeFilters.push(`downscale-${exportW}x${exportH}`);
   }
 
   // Composite the overlay PNG sequence here, BEFORE the zoom filter, so the
   // click rings + cursor share a coordinate system with the video pixels and
-  // get scaled together. eof_action=pass lets the video continue past the
-  // overlay if rounded frame counts differ by one — better than the default
-  // `repeat` which would smear the last overlay state.
+  // get scaled together. The overlay PNGs are rendered at exportW × exportH
+  // upstream so we can composite at 0,0 with no scaling. eof_action=pass
+  // lets the video continue past the overlay if rounded frame counts differ
+  // by one — better than the default `repeat` which would smear the last
+  // overlay state.
   if (hasClickOverlay) {
     parts.push(`${vCur}[1:v]overlay=0:0:format=auto:eof_action=pass[vclick]`);
     vCur = '[vclick]';
+    activeFilters.push('overlay-click+cursor');
   }
 
   // Baseline center for sampleCursorPath — follow-cursor segments ease into
@@ -556,10 +679,18 @@ function buildFilterGraph(
   const previewBaseCx = src.width / 2;
   const previewBaseCy = src.height / 2;
 
+  // The surviving timeline ends at the last kept range. Auto-zooms anchored
+  // to events.duration can land a frame or two past the actual mp4 duration
+  // (wall-clock event timing vs AVAssetWriter's finalized file duration),
+  // which would silently drop the segment. Clamp so a hair-over zoom snaps
+  // back in-bounds instead of disappearing.
+  const lastRangeEnd = ranges.length ? ranges[ranges.length - 1][1] : 0;
   const zoomKeys: ZoomKey[] = zooms
     .map((z): ZoomKey | null => {
+      const effEnd = Math.min(z.end, lastRangeEnd);
+      if (effEnd <= z.start + 0.05) return null;
       const zs = mapOrigToOutput(z.start, ranges, speeds);
-      const ze = mapOrigToOutput(z.end, ranges, speeds);
+      const ze = mapOrigToOutput(effEnd, ranges, speeds);
       if (zs === null || ze === null) return null;
 
       let cx = z.x, cy = z.y;
@@ -584,19 +715,27 @@ function buildFilterGraph(
 
   const useGlobalZoom = project.globalZoom.enabled && project.globalZoom.scale > 1;
   if (zoomKeys.length || useGlobalZoom) {
+    activeFilters.push(`zoom(keys=${zoomKeys.length}, global=${useGlobalZoom})`);
     const baseScale = useGlobalZoom ? project.globalZoom.scale : 1;
     const baseCx = src.width / 2;
     const baseCy = src.height / 2;
     const { cx, cy, s } = buildZoomExpr(zoomKeys, baseScale, baseCx, baseCy);
-    // All four expressions are single-quoted because they contain literal
-    // commas (from if/between/etc) that the filter-graph parser would
-    // otherwise read as filter-chain separators. scale needs eval=frame to
-    // re-evaluate per frame; crop reads x/y as expressions implicitly.
+    // When the source is below the tier max (exportScale === 1) we don't
+    // wrap the expression — extra parens / multiply-by-1 widens the AST
+    // for no benefit and risks tripping ffmpeg's expression depth limits
+    // on long piecewise paths. When we are downscaling, multiply by the
+    // export scale so cx/cy land in the downscaled coordinate space.
+    const cxOut = exportScale === 1 ? `(${cx})` : `((${cx})*${exportScale})`;
+    const cyOut = exportScale === 1 ? `(${cy})` : `((${cy})*${exportScale})`;
+    // Single-quoted because the inner expressions contain commas the
+    // filter-graph parser would otherwise read as filter-chain separators.
+    // scale needs eval=frame to re-evaluate per frame; crop reads x/y as
+    // expressions implicitly.
     const scaleFilter = `scale='iw*(${s})':'ih*(${s})':eval=frame`;
     const cropFilter =
-      `crop=${src.width}:${src.height}:` +
-      `'(${cx})*(${s})-${src.width}/2':` +
-      `'(${cy})*(${s})-${src.height}/2'`;
+      `crop=${exportW}:${exportH}:` +
+      `'${cxOut}*(${s})-${exportW}/2':` +
+      `'${cyOut}*(${s})-${exportH}/2'`;
     parts.push(`${vCur}${scaleFilter},${cropFilter}[vz]`);
     vCur = '[vz]';
   }
@@ -604,22 +743,25 @@ function buildFilterGraph(
   // Background frame: positive padding adds bg, negative crops the source.
   // Pipeline: (1) crop by negative parts, (2) round corners, (3) overlay
   // onto a solid color canvas.
+  // Padding / radius values are stored in source-pixel coords; the pipeline
+  // now operates at exportW × exportH, so scale everything through by
+  // exportScale (= 1.0 for the High tier, no-op).
   const { padding, color, radius } = project.background;
 
-  const cropLeft = Math.max(0, -padding.left);
-  const cropRight = Math.max(0, -padding.right);
-  const cropTop = Math.max(0, -padding.top);
-  const cropBottom = Math.max(0, -padding.bottom);
-  const cropW = src.width - cropLeft - cropRight;
-  const cropH = src.height - cropTop - cropBottom;
+  const cropLeft = Math.round(Math.max(0, -padding.left) * exportScale);
+  const cropRight = Math.round(Math.max(0, -padding.right) * exportScale);
+  const cropTop = Math.round(Math.max(0, -padding.top) * exportScale);
+  const cropBottom = Math.round(Math.max(0, -padding.bottom) * exportScale);
+  const cropW = exportW - cropLeft - cropRight;
+  const cropH = exportH - cropTop - cropBottom;
   if (cropW < 4 || cropH < 4) {
     throw new Error('Padding crops the entire recording. Make at least one side less negative.');
   }
 
-  const padLeft = Math.max(0, padding.left);
-  const padRight = Math.max(0, padding.right);
-  const padTop = Math.max(0, padding.top);
-  const padBottom = Math.max(0, padding.bottom);
+  const padLeft = Math.round(Math.max(0, padding.left) * exportScale);
+  const padRight = Math.round(Math.max(0, padding.right) * exportScale);
+  const padTop = Math.round(Math.max(0, padding.top) * exportScale);
+  const padBottom = Math.round(Math.max(0, padding.bottom) * exportScale);
 
   const innerW = cropW + padLeft + padRight;
   const innerH = cropH + padTop + padBottom;
@@ -651,14 +793,18 @@ function buildFilterGraph(
   if (cropLeft > 0 || cropRight > 0 || cropTop > 0 || cropBottom > 0) {
     parts.push(`${vCur}crop=${cropW}:${cropH}:${cropLeft}:${cropTop}[vc]`);
     vCur = '[vc]';
+    activeFilters.push('pad-crop');
   }
 
-  if (radius > 0) {
-    const maskExpr =
-      `format=yuva420p,` +
-      `geq=lum='p(X,Y)':a='if(gt(abs(X-W/2),W/2-${radius})*gt(abs(Y-H/2),H/2-${radius}),` +
-      `if(lt(hypot(abs(X-W/2)-(W/2-${radius}),abs(Y-H/2)-(H/2-${radius})),${radius}),255,0),255)'`;
-    parts.push(`${vCur}${maskExpr}[vr]`);
+  if (radius > 0 && hasRoundedMask) {
+    activeFilters.push('rounded-corners');
+    // Pre-rendered alpha mask at input index (1 if no overlay, 2 if there
+    // is). format=yuva420p promotes the video to RGBA so alphamerge has an
+    // alpha channel to replace; alphamerge then takes its alpha from the
+    // mask's grayscale (white = visible, black = transparent corner).
+    const maskIdx = hasClickOverlay ? 2 : 1;
+    parts.push(`${vCur}format=yuva420p[v_a]`);
+    parts.push(`[v_a][${maskIdx}:v]alphamerge[vr]`);
     vCur = '[vr]';
   }
 
@@ -666,8 +812,9 @@ function buildFilterGraph(
   // and the overlay output runs at the slower side.
   parts.push(`color=c=0x${colorHex}:s=${targetW}x${targetH}:r=${outputFps}[bgc]`);
   parts.push(`[bgc]${vCur}overlay=x=${overlayX}:y=${overlayY}:shortest=1[vout]`);
+  activeFilters.push('bg-composite');
 
-  return { graph: parts.join(';'), outLabels: ['[vout]', hasAudio ? aCur : null] };
+  return { graph: parts.join(';'), outLabels: ['[vout]', hasAudio ? aCur : null], activeFilters };
 }
 
 function atempoChain(factor: number): string {
@@ -840,9 +987,20 @@ async function renderOverlayFrames(
 ): Promise<string> {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'klick-overlay-'));
 
+  // One blank PNG that every empty frame hardlinks to. PNG (vs WebP) is
+  // load-bearing here — @napi-rs/canvas's WebP output gets interpreted as
+  // multi-frame by ffmpeg's image2 demuxer (each file expands into ~30
+  // frames), which made exports run 30x longer than the source. PNG is
+  // single-frame by construction.
   const blankCanvas = createCanvas(srcWidth, srcHeight);
   const blankPath = path.join(tmpDir, '_blank.png');
-  await fs.writeFile(blankPath, blankCanvas.encodeSync('png'));
+  await fs.writeFile(blankPath, await blankCanvas.encode('png'));
+
+  // One canvas reused for the whole pass. Allocating a fresh 24MB canvas
+  // per frame was a significant chunk of the export time on retina sources;
+  // drawOverlayFrame already clearRects before drawing so reuse is safe.
+  const canvas = createCanvas(srcWidth, srcHeight);
+  const ctx = canvas.getContext('2d');
 
   const sw = events.screen_width > 0 ? events.screen_width : srcWidth;
   const sh = events.screen_height > 0 ? events.screen_height : srcHeight;
@@ -853,6 +1011,7 @@ async function renderOverlayFrames(
   onLog?.(`Overlay: ${frameCount} frames @ ${outputFps} fps → ${tmpDir}\n`);
 
   let activeFrames = 0;
+  const loopStart = Date.now();
   for (let i = 0; i < frameCount; i++) {
     if (signal?.aborted) {
       await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
@@ -863,18 +1022,52 @@ async function renderOverlayFrames(
     const fpath = path.join(tmpDir, fname);
 
     if (hasActiveOverlay(tSrc, evs, clickCfg, cursorCfg)) {
-      const canvas = createCanvas(srcWidth, srcHeight);
-      const ctx = canvas.getContext('2d');
       drawOverlayFrame(ctx, tSrc, evs, clickCfg, cursorCfg, srcWidth, srcHeight, sw, sh);
-      await fs.writeFile(fpath, canvas.encodeSync('png'));
+      const buf = await canvas.encode('png');
+      await fs.writeFile(fpath, buf);
       activeFrames++;
     } else {
       await fs.link(blankPath, fpath);
+    }
+    if (i > 0 && i % 100 === 0) {
+      const elapsed = (Date.now() - loopStart) / 1000;
+      const fps = i / elapsed;
+      onLog?.(`Overlay: ${i}/${frameCount} (${fps.toFixed(0)} fps)\n`);
     }
   }
 
   onLog?.(`Overlay: ${activeFrames}/${frameCount} frames had visible overlay\n`);
   return tmpDir;
+}
+
+// Pre-render the rounded-corner alpha mask as a single PNG so ffmpeg can
+// apply it via `alphamerge` instead of computing the round shape with a
+// per-pixel `geq` expression every frame. geq's hypot() call inside the
+// corner-zone test was the dominant export-time cost on retina sources —
+// billions of sqrt evaluations per export. Generating the mask once is
+// effectively free; alphamerge is then a hardware-cheap alpha replacement
+// per frame.
+async function writeRoundedMask(filePath: string, w: number, h: number, radius: number): Promise<void> {
+  const r = Math.min(radius, Math.floor(w / 2), Math.floor(h / 2));
+  const canvas = createCanvas(w, h);
+  const ctx = canvas.getContext('2d');
+  // Black = fully transparent in alphamerge (alpha 0), white = fully opaque.
+  ctx.fillStyle = 'black';
+  ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.moveTo(r, 0);
+  ctx.lineTo(w - r, 0);
+  ctx.arcTo(w, 0, w, r, r);
+  ctx.lineTo(w, h - r);
+  ctx.arcTo(w, h, w - r, h, r);
+  ctx.lineTo(r, h);
+  ctx.arcTo(0, h, 0, h - r, r);
+  ctx.lineTo(0, r);
+  ctx.arcTo(0, 0, r, 0, r);
+  ctx.closePath();
+  ctx.fill();
+  await fs.writeFile(filePath, await canvas.encode('png'));
 }
 
 // Inverse of mapOrigToOutput for single-speed chunks: source time visible at
