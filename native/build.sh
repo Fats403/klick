@@ -15,11 +15,15 @@ ARM64="$OUT_DIR/klick-capture-arm64"
 X64="$OUT_DIR/klick-capture-x64"
 
 # macos13.0 target: SCContentFilter(desktopIndependentWindow:) is 13+.
+# -suppress-warnings silences Swift 5's "will be an error in Swift 6 language
+# mode" concurrency warnings. The flagged patterns (NSLock in async, captured
+# vars in @Sendable closures, DispatchSemaphore.wait in async) are working
+# correctly under Swift 5 mode; revisit when migrating to Swift 6.
 echo "[swift] building arm64..."
-swiftc -O -target arm64-apple-macos13.0 "$SRC" -o "$ARM64"
+swiftc -O -suppress-warnings -target arm64-apple-macos13.0 "$SRC" -o "$ARM64"
 
 echo "[swift] building x86_64..."
-swiftc -O -target x86_64-apple-macos13.0 "$SRC" -o "$X64"
+swiftc -O -suppress-warnings -target x86_64-apple-macos13.0 "$SRC" -o "$X64"
 
 echo "[lipo] merging..."
 lipo -create -output "$OUT" "$ARM64" "$X64"

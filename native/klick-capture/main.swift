@@ -427,8 +427,6 @@ func recordCommand(flags: [String: String]) async {
     int_.setEventHandler(handler: onStop)
     int_.resume()
 
-    // Drive the run loop on a background queue and wait on the semaphore
-    // from main so we exit only after finishWriting() returns.
     // Drive the run loop on a background queue and block main on the
     // semaphore so we exit only after finishWriting() returns.
     DispatchQueue.global().async {

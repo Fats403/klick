@@ -75,8 +75,11 @@ function createWindow() {
 
   const devUrl = process.env['ELECTRON_RENDERER_URL'];
   if (devUrl) {
+    // DevTools available on demand via ⌘⌥I (or View → Toggle Developer
+    // Tools). Auto-opening triggers a slew of DevTools-frontend CDP
+    // requests (Autofill, etc.) that Electron doesn't implement, spamming
+    // stderr — easier to skip auto-open than to filter them.
     mainWindow.loadURL(devUrl);
-    mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
