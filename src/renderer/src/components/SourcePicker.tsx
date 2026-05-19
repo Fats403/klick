@@ -108,7 +108,10 @@ function SourceCard({
   return (
     <button
       onClick={() => onPick(source)}
-      className="group flex flex-col gap-2 p-2 rounded-lg border border-border bg-foreground/[0.02] hover:bg-foreground/5 hover:border-foreground/20 transition-colors text-left"
+      // min-w-0 prevents the button (a grid item) from expanding past its
+      // column to fit a long source name. Without it, .truncate inside has
+      // no width constraint to clip against and the text bleeds horizontally.
+      className="group min-w-0 flex flex-col gap-2 p-2 rounded-lg border border-border bg-foreground/[0.02] hover:bg-foreground/5 hover:border-foreground/20 transition-colors text-left"
     >
       <div className="aspect-[16/10] w-full rounded-md overflow-hidden bg-black/40 flex items-center justify-center">
         {source.thumbnail ? (
@@ -121,7 +124,7 @@ function SourceCard({
           <span className="text-[10px] text-muted">no preview</span>
         )}
       </div>
-      <div className="px-1 pb-1">
+      <div className="w-full px-1 pb-1 min-w-0">
         <div className="text-xs text-foreground truncate">{source.name}</div>
         <div className="text-[10px] text-muted mt-0.5">
           {source.width}×{source.height}

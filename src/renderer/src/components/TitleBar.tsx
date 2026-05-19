@@ -12,6 +12,9 @@ interface Props {
 
 export function TitleBar({ onRecord, onExport, onOpenVideo, onOpenProject, onSaveProject }: Props) {
   const videoName = useEditor((s) => s.videoName);
+  const videoPath = useEditor((s) => s.videoPath);
+  // Save / Export only make sense once there's a recording loaded.
+  const hasVideo = videoPath !== null;
 
   return (
     <header className="drag-region h-12 flex items-center px-3 border-b border-border bg-surface">
@@ -35,10 +38,10 @@ export function TitleBar({ onRecord, onExport, onOpenVideo, onOpenProject, onSav
         <Button onClick={onOpenProject} variant="ghost" size="sm">
           <FolderOpen className="w-3.5 h-3.5" /> Open project
         </Button>
-        <Button onClick={onSaveProject} variant="ghost" size="sm">
+        <Button onClick={onSaveProject} variant="ghost" size="sm" disabled={!hasVideo} title={hasVideo ? undefined : 'Record or open a video first'}>
           <Save className="w-3.5 h-3.5" /> Save
         </Button>
-        <Button onClick={onExport} variant="primary" size="sm">
+        <Button onClick={onExport} variant="primary" size="sm" disabled={!hasVideo} title={hasVideo ? undefined : 'Record or open a video first'}>
           <Upload className="w-3.5 h-3.5" /> Export
         </Button>
       </div>
